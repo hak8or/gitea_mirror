@@ -1,0 +1,31 @@
+name: Cargo Build & Test
+
+on:
+  push:
+  pull_request:
+
+env: 
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Rust project - latest
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust_ver:
+          - "1.90"
+    # Very ugly way to force cargo and jazz to be in PATH across run's but
+    # lets fix this alter.
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+      - run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - run: rustup update ${{ matrix.rust_ver }} && rustup default ${{ matrix.rust_ver }}
+      - run: cargo build
+      - run: cargo build --release
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: target/release/gitea_mirror
