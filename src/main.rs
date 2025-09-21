@@ -1,193 +1,235 @@
+use anyhow::{Context, Result};
 use clap::Parser;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
+use url::Url;
 
+// --- Structs (Unchanged) ---
 #[derive(Parser, Debug)]
-#[command(name = "gitea-mirror")]
-#[command(about = "Ensures Git repositories are mirrored to Gitea, generated with Claude Opus 4.1")]
-struct Args {
-    /// Path to TOML configuration file
-    #[arg(short, long, env = "GITEA_MIRROR_CONFIG_FILEPATH")]
+#[command(
+    author,
+    version,
+    about = "A simple tool to ensure git repositories are mirrored to Gitea."
+)]
+struct Cli {
+    #[arg(short, long, env = "GITEA_MIRROR_CONFIG")]
     config: PathBuf,
-
-    /// Dry run - check but don't create migrations
-    #[arg(short, long, default_value_t = false)]
+    #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct RepoToMirror {
+    url: String,
+    rename: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Config {
     gitea_url: String,
     api_key: String,
-    git_urls: Vec<String>,
+    repos: Vec<RepoToMirror>,
 }
 
+// --- Gitea API Structs (Corrected) ---
 #[derive(Deserialize, Debug)]
-struct Repository {
+struct GiteaUser {
+    id: i64,
+    login: String,
+}
+
+// **MODIFIED**: This struct now includes `name` and the correct `mirror_url` field.
+#[derive(Deserialize, Debug)]
+struct GiteaRepo {
     name: String,
     mirror: bool,
-    original_url: Option<String>,
+    mirror_url: Option<String>, // The original source URL of the mirror
 }
 
-#[derive(Serialize)]
-struct MigrateRepoRequest {
-    clone_addr: String,
-    repo_name: String,
+#[derive(Serialize, Debug)]
+struct MigrationRequest<'a> {
+    clone_addr: &'a str,
+    uid: i64,
+    repo_name: &'a str,
     mirror: bool,
     private: bool,
     description: String,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
 
-    let args = Args::parse();
+    let config_content = fs::read_to_string(&cli.config)
+        .with_context(|| format!("Failed to read config file at {:?}", cli.config))?;
+    let config: Config =
+        toml::from_str(&config_content).context("Failed to parse TOML configuration")?;
 
-    // Load configuration
-    let config_content = std::fs::read_to_string(&args.config)?;
-    let config: Config = toml::from_str(&config_content)?;
+    if cli.dry_run {
+        info!("🔬 Performing a dry run. No migrations will be created.");
+    }
 
-    info!("Starting Gitea mirror sync");
-    info!("Dry run: {}", args.dry_run);
-    info!("Gitea URL: {}", config.gitea_url);
-    info!("Checking {} repositories", config.git_urls.len());
-
-    // Create HTTP client with auth header
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("token {}", config.api_key))?,
-    );
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(ACCEPT, "application/json".parse()?);
+    headers.insert(CONTENT_TYPE, "application/json".parse()?);
+    headers.insert(USER_AGENT, "gitea-mirror-tool/0.1.0".parse()?);
+    headers.insert(AUTHORIZATION, format!("token {}", config.api_key).parse()?);
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .build()?;
 
-    // Process each Git URL
-    for git_url in &config.git_urls {
-        info!("Processing: {}", git_url);
+    info!("🔗 Connecting to Gitea instance at {}", config.gitea_url);
 
-        let repo_name = extract_repo_name(git_url);
-        let is_mirrored =
-            check_if_mirrored(&client, &config.gitea_url, git_url, &repo_name).await?;
-
-        if is_mirrored {
-            info!("✓ Already mirrored: {}", repo_name);
-        } else {
-            warn!("✗ Not mirrored: {}", repo_name);
-
-            if !args.dry_run {
-                info!("Creating migration for: {}", repo_name);
-                create_migration(&client, &config.gitea_url, git_url, &repo_name).await?;
-                info!("✓ Migration created for: {}", repo_name);
-            } else {
-                info!("[DRY RUN] Would create migration for: {}", repo_name);
-            }
-        }
-    }
-
-    info!("Gitea mirror sync complete");
-    Ok(())
-}
-
-fn extract_repo_name(git_url: &str) -> String {
-    let url = git_url.trim_end_matches(".git");
-    url.split('/').last().unwrap_or("unknown").to_string()
-}
-
-async fn check_if_mirrored(
-    client: &reqwest::Client,
-    gitea_url: &str,
-    git_url: &str,
-    repo_name: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // Search for repositories by name
-    let search_url = format!("{}/api/v1/repos/search", gitea_url);
-    let response = client
-        .get(&search_url)
-        .query(&[("q", repo_name), ("limit", "50")])
+    let user_url = format!("{}/api/v1/user", config.gitea_url);
+    let user = client
+        .get(&user_url)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?
+        .json::<GiteaUser>()
+        .await
+        .context("Failed to get Gitea user info. Check your API key and Gitea URL.")?;
+    info!(
+        "🔑 Authenticated as user '{}' (ID: {})",
+        user.login, user.id
+    );
 
-    if !response.status().is_success() {
-        error!("Failed to search repos: {}", response.status());
-        return Ok(false);
-    }
+    // **MODIFIED**: We now build two sets: one for source URLs and one for existing repo names.
+    info!("🔍 Fetching all existing repositories to build a local cache...");
+    let mut existing_mirror_sources: HashSet<String> = HashSet::new();
+    let mut existing_repo_names: HashSet<String> = HashSet::new();
+    let mut page = 1;
+    loop {
+        let repos_url = format!("{}/api/v1/user/repos", config.gitea_url);
+        let repos_on_page = client
+            .get(&repos_url)
+            .query(&[("limit", "50"), ("page", &page.to_string())])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<GiteaRepo>>()
+            .await
+            .context("Failed to fetch a page of existing repositories.")?;
 
-    let search_result: serde_json::Value = response.json().await?;
+        if repos_on_page.is_empty() {
+            break;
+        }
 
-    if let Some(data) = search_result.get("data").and_then(|d| d.as_array()) {
-        for repo_json in data {
-            if let Ok(repo) = serde_json::from_value::<Repository>(repo_json.clone()) {
-                debug!("Found repo: {} (mirror: {})", repo.name, repo.mirror);
+        for repo in repos_on_page {
+            // Add the name of EVERY repo to prevent any name collisions.
+            existing_repo_names.insert(repo.name);
 
-                // Check if this is a mirror and matches our URL
-                if repo.mirror {
-                    if let Some(original) = &repo.original_url {
-                        // Normalize URLs for comparison
-                        let normalized_original = normalize_git_url(original);
-                        let normalized_target = normalize_git_url(git_url);
-
-                        if normalized_original == normalized_target {
-                            return Ok(true);
-                        }
-                    }
+            // If it's a mirror, store its ORIGINAL source URL for an exact match.
+            if repo.mirror {
+                if let Some(mirror_url) = repo.mirror_url {
+                    existing_mirror_sources.insert(mirror_url);
                 }
             }
         }
+        page += 1;
     }
 
-    Ok(false)
-}
+    info!(
+        "Found {} existing repositories and {} configured mirrors.",
+        existing_repo_names.len(),
+        existing_mirror_sources.len()
+    );
 
-fn normalize_git_url(url: &str) -> String {
-    let mut normalized = url.to_lowercase();
+    // **MODIFIED**: The main checking logic is now much more robust.
+    for repo_config in &config.repos {
+        let url_to_mirror = &repo_config.url;
 
-    // Remove trailing .git
-    if normalized.ends_with(".git") {
-        normalized = normalized[..normalized.len() - 4].to_string();
+        // CHECK 1: Has this exact source URL already been mirrored?
+        if existing_mirror_sources.contains(url_to_mirror) {
+            info!(
+                "✅ Mirror for source URL '{}' already exists. Skipping.",
+                url_to_mirror
+            );
+            continue;
+        }
+
+        // Determine the target name for the new repository.
+        let target_repo_name = match &repo_config.rename {
+            Some(name) => name.clone(),
+            None => get_repo_name_from_url(url_to_mirror).with_context(|| {
+                format!("Could not parse repo name from URL: {}", url_to_mirror)
+            })?,
+        };
+
+        // CHECK 2: Will creating this mirror cause a name collision?
+        if existing_repo_names.contains(&target_repo_name) {
+            warn!(
+                "⚠️ Cannot create mirror for '{}'. A repository named '{}' already exists. Skipping.",
+                url_to_mirror, target_repo_name
+            );
+            continue;
+        }
+
+        // If both checks pass, we are clear to create the migration.
+        info!(
+            "🔎 Mirror for '{}' not found and name '{}' is available. Needs creation.",
+            url_to_mirror, target_repo_name
+        );
+
+        if cli.dry_run {
+            warn!(
+                "--dry-run enabled, skipping migration for '{}'.",
+                url_to_mirror
+            );
+            continue;
+        }
+
+        let migration_payload = MigrationRequest {
+            clone_addr: url_to_mirror,
+            uid: user.id,
+            repo_name: &target_repo_name,
+            mirror: true,
+            private: true,
+            description: format!("Mirror of {}", url_to_mirror),
+        };
+
+        info!(
+            "🚀 Creating migration for '{}' as new repo '{}'...",
+            url_to_mirror, target_repo_name
+        );
+
+        let migrate_url = format!("{}/api/v1/repos/migrate", config.gitea_url);
+        let response = client
+            .post(&migrate_url)
+            .json(&migration_payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            info!(
+                "✅ Successfully initiated migration for '{}'.",
+                url_to_mirror
+            );
+        } else {
+            let status = response.status();
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Could not read error body".to_string());
+            error!(
+                "🔥 Failed to create migration for '{}'. Status: {}. Body: {}",
+                url_to_mirror, status, error_body
+            );
+        }
     }
 
-    // Convert git@ to https://
-    if normalized.starts_with("git@") {
-        normalized = normalized.replace("git@", "https://").replace(":", "/");
-    }
-
-    // Remove protocol variations
-    normalized = normalized
-        .replace("https://", "")
-        .replace("http://", "")
-        .replace("git://", "");
-
-    normalized
-}
-
-async fn create_migration(
-    client: &reqwest::Client,
-    gitea_url: &str,
-    git_url: &str,
-    repo_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let migrate_url = format!("{}/api/v1/repos/migrate", gitea_url);
-
-    let request = MigrateRepoRequest {
-        clone_addr: git_url.to_string(),
-        repo_name: repo_name.to_string(),
-        mirror: true,
-        private: false,
-        description: format!("Mirror of {}", git_url),
-    };
-
-    let response = client.post(&migrate_url).json(&request).send().await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await?;
-        error!("Failed to create migration: {} - {}", status, error_text);
-        return Err(format!("Migration failed: {}", status).into());
-    }
-
+    info!("✨ All tasks completed.");
     Ok(())
+}
+
+fn get_repo_name_from_url(git_url: &str) -> Option<String> {
+    Url::parse(git_url)
+        .ok()
+        .and_then(|url| url.path_segments()?.last().map(|s| s.to_string()))
+        .map(|name| name.strip_suffix(".git").unwrap_or(&name).to_string())
 }
