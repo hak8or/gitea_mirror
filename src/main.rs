@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
         toml::from_str(&config_content).context("Failed to parse TOML configuration")?;
 
     if cli.dry_run {
-        info!("🔬 Performing a dry run. No migrations will be created.");
+        info!("Performing a dry run. No migrations will be created.");
     }
 
     let mut headers = reqwest::header::HeaderMap::new();
@@ -94,10 +94,7 @@ async fn main() -> Result<()> {
         .json::<GiteaUser>()
         .await
         .context("Failed to get Gitea user info. Check your API key and Gitea URL.")?;
-    info!(
-        "🔑 Authenticated as user '{}' (ID: {})",
-        user.login, user.id
-    );
+    info!("Authenticated as user '{}' (ID: {})", user.login, user.id);
 
     // **MODIFIED**: We now build two sets: one for source URLs and one for existing repo names.
     info!("🔍 Fetching all existing repositories to build a local cache...");
@@ -147,7 +144,7 @@ async fn main() -> Result<()> {
         // CHECK 1: Has this exact source URL already been mirrored?
         if existing_mirror_sources.contains(url_to_mirror) {
             info!(
-                "✅ Mirror for source URL '{}' already exists. Skipping.",
+                "Mirror for source URL '{}' already exists. Skipping.",
                 url_to_mirror
             );
             continue;
@@ -164,7 +161,7 @@ async fn main() -> Result<()> {
         // CHECK 2: Will creating this mirror cause a name collision?
         if existing_repo_names.contains(&target_repo_name) {
             warn!(
-                "⚠️ Cannot create mirror for '{}'. A repository named '{}' already exists. Skipping.",
+                "Cannot create mirror for '{}'. A repository named '{}' already exists. Skipping.",
                 url_to_mirror, target_repo_name
             );
             continue;
@@ -172,7 +169,7 @@ async fn main() -> Result<()> {
 
         // If both checks pass, we are clear to create the migration.
         info!(
-            "🔎 Mirror for '{}' not found and name '{}' is available. Needs creation.",
+            "Mirror for '{}' not found and name '{}' is available. Needs creation.",
             url_to_mirror, target_repo_name
         );
 
@@ -206,10 +203,7 @@ async fn main() -> Result<()> {
             .await?;
 
         if response.status().is_success() {
-            info!(
-                "✅ Successfully initiated migration for '{}'.",
-                url_to_mirror
-            );
+            info!("Successfully initiated migration for '{}'.", url_to_mirror);
         } else {
             let status = response.status();
             let error_body = response
@@ -217,13 +211,13 @@ async fn main() -> Result<()> {
                 .await
                 .unwrap_or_else(|_| "Could not read error body".to_string());
             error!(
-                "🔥 Failed to create migration for '{}'. Status: {}. Body: {}",
+                "Failed to create migration for '{}'. Status: {}. Body: {}",
                 url_to_mirror, status, error_body
             );
         }
     }
 
-    info!("✨ All tasks completed.");
+    info!("All tasks completed.");
     Ok(())
 }
 
