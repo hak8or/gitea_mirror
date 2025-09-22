@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             uid: user.id,
             repo_name: &target_repo_name,
             mirror: true,
-            private: true,
+            private: false,
             description: format!("Mirror of {}", url_to_mirror),
         };
 
