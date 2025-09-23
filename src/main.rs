@@ -31,13 +31,20 @@ struct RepoConfig {
     rename: Option<String>,
 }
 
+// Represents a single organization entry in the config file.
+#[derive(Deserialize, Debug, Clone)]
+struct OrgConfig {
+    url: String,
+    api_key: Option<String>,
+}
+
 // Represents the main structure of the TOML configuration file.
 #[derive(Deserialize, Debug)]
 struct Config {
     gitea_url: String,
     api_key: String,
     repos: Option<Vec<RepoConfig>>,
-    organizations: Option<Vec<String>>,
+    organizations: Option<Vec<OrgConfig>>,
 }
 
 // Represents the payload for creating a migration in Gitea.
@@ -49,6 +56,12 @@ struct MigrateRepoPayload<'a> {
     private: bool,
     description: &'a str,
     uid: i64, // The user ID of the owner. We'll fetch this.
+}
+
+// Represents a repository as returned by the Gitea API.
+#[derive(Deserialize, Debug)]
+struct GiteaRepo {
+    name: String,
 }
 
 // Represents a user as returned by the Gitea API.
@@ -113,12 +126,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Process repositories from the organizations/users list.
-    if let Some(org_urls) = &config.organizations {
-        for org_url in org_urls {
-            info!("Fetching repositories from organization: {}", org_url);
-            match fetch_org_repos(&http_client, org_url, &config.api_key).await {
+    if let Some(org_configs) = &config.organizations {
+        for org_config in org_configs {
+            info!(
+                "Fetching repositories from organization: {}",
+                org_config.url
+            );
+            match fetch_org_repos(&http_client, &org_config.url, org_config.api_key.as_deref())
+                .await
+            {
                 Ok(repo_urls) => {
-                    info!("Found {} repositories for {}", repo_urls.len(), org_url);
+                    info!(
+                        "Found {} repositories for {}",
+                        repo_urls.len(),
+                        org_config.url
+                    );
                     for url in repo_urls {
                         process_repo(
                             &url,
@@ -131,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await?;
                     }
                 }
-                Err(e) => error!("Failed to fetch repos from {}: {}", org_url, e),
+                Err(e) => error!("Failed to fetch repos from {}: {}", org_config.url, e),
             }
         }
     }
@@ -223,7 +245,7 @@ async fn create_migration(
 async fn fetch_org_repos(
     http_client: &reqwest::Client,
     org_url: &str,
-    api_key: &str,
+    api_key: Option<&str>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // This is a simplified fetcher. It assumes Gitea API compatibility.
     // For GitHub, you might need a different base URL and auth method.
@@ -247,12 +269,17 @@ async fn fetch_org_repos(
     let mut repos: Vec<String> = Vec::new();
     let mut page = 1;
     loop {
-        let response: Vec<serde_json::Value> = http_client
+        let mut request_builder = http_client
             .get(&api_url)
             .query(&[("page", page.to_string())])
             // For GitHub, a User-Agent is required.
-            .header("User-Agent", "gitea-mirror-rust-client")
-            .header("Authorization", format!("token {}", api_key))
+            .header("User-Agent", "gitea-mirror-rust-client");
+
+        if let Some(key) = api_key {
+            request_builder = request_builder.header("Authorization", format!("token {}", key));
+        }
+
+        let response: Vec<serde_json::Value> = request_builder
             .send()
             .await?
             .error_for_status()?
