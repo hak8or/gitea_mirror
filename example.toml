@@ -1,0 +1,17 @@
+# The base URL of your Gitea instance
+gitea_url = "https://gitmirror.hak8or.com"
+
+# Your Gitea API key (generate one from User Settings -> Applications)
+api_key = "API_KEY_GOES_HERE"
+
+# A list of remote git repositories to mirror.
+repos = [
+	{ url = "https://gitea.hak8or.com/hak8or/gitea_mirror.git" },
+	{ rename = "cool_rename", url = "https://gitea.hak8or.com/hak8or/gitea_mirror.git" },
+	{ rename = "cool_another_rename", url = "https://gitea.hak8or.com/hak8or/gitea_mirror.git" },
+	{ url = "https://github.com/justcallmekoko/ESP32Marauder" }
+]
+
+organizations = [
+	{ url = "https://gitea.hak8or.com/mirrors" },
+]
