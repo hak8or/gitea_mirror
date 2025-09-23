@@ -1,11 +1,5 @@
-//! # Gitea Mirror
-//!
-//! A simple command-line tool to ensure a list of remote git repositories are mirrored to a Gitea instance.
-//! It checks if a repository already exists and, if not, creates a mirror migration.
-
 use clap::Parser;
 use serde::Deserialize;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{Level, error, info, instrument, warn};
@@ -13,14 +7,18 @@ use tracing_subscriber;
 
 // Represents the command-line arguments.
 #[derive(Parser, Debug)]
+#[command(name = "gitea-mirror")]
+#[command(
+    about = "Ensures Git repositories are mirrored to Gitea, generated with Gemini 2.5 Web Canvas"
+)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
     /// Path to the TOML configuration file.
-    #[clap(short, long, value_parser)]
+    #[clap(short, long, value_parser, env = "GITEA_MIRROR_CONFIG_FILEPATH")]
     config: PathBuf,
 
     /// Perform a dry run without creating any migrations.
-    #[clap(short, long)]
+    #[clap(short, long, default_value_t = false)]
     dry_run: bool,
 }
 
@@ -58,12 +56,6 @@ struct MigrateRepoPayload<'a> {
     uid: i64, // The user ID of the owner. We'll fetch this.
 }
 
-// Represents a repository as returned by the Gitea API.
-#[derive(Deserialize, Debug)]
-struct GiteaRepo {
-    name: String,
-}
-
 // Represents a user as returned by the Gitea API.
 #[derive(Deserialize, Debug)]
 struct GiteaUser {
@@ -77,25 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     // Parse command-line arguments or get config path from environment variable.
-    let args = match Args::try_parse() {
-        Ok(args) => args,
-        Err(_) => {
-            // If parsing fails, check for the environment variable.
-            if let Ok(config_path) = env::var("GITEA_MIRROR_CONFIG") {
-                Args {
-                    config: PathBuf::from(config_path),
-                    // Check for a dry-run env var as well, defaulting to false.
-                    dry_run: env::var("GITEA_MIRROR_DRY_RUN")
-                        .unwrap_or_else(|_| "false".to_string())
-                        .parse()
-                        .unwrap_or(false),
-                }
-            } else {
-                // If no env var, show help and exit.
-                Args::parse()
-            }
-        }
-    };
+    let args = Args::parse();
 
     info!("Starting Gitea mirror process. Dry run: {}", args.dry_run);
 
