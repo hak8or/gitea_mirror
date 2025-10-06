@@ -4,6 +4,10 @@ gitea_url = "https://gitmirror.hak8or.com"
 # Your Gitea API key (generate one from User Settings -> Applications)
 api_key = "API_KEY_GOES_HERE"
 
+# Optional: specify the owner username for all migrated repos
+# If not specified, uses the user who owns the API key
+repo_owner = "mirror_org"
+
 # A list of remote git repositories to mirror.
 repos = [
 	{ url = "https://gitea.hak8or.com/hak8or/gitea_mirror.git" },

@@ -43,6 +43,7 @@ struct Config {
     api_key: String,
     repos: Option<Vec<RepoConfig>>,
     organizations: Option<Vec<OrgConfig>>,
+    repo_owner: Option<String>, // Optional owner username/org for all migrated repos
 }
 
 // Represents the payload for creating a migration in Gitea.
@@ -50,16 +51,16 @@ struct Config {
 struct MigrateRepoPayload<'a> {
     clone_addr: &'a str,
     repo_name: &'a str,
+    repo_owner: &'a str, // Username or organization name
     mirror: bool,
     private: bool,
     description: &'a str,
-    uid: i64, // The user ID of the owner. We'll fetch this.
 }
 
 // Represents a user as returned by the Gitea API.
 #[derive(Deserialize, Debug)]
 struct GiteaUser {
-    id: i64,
+    login: String,
 }
 
 /// Entry point of the application.
@@ -77,12 +78,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(&args.config)?;
     let http_client = reqwest::Client::new();
 
-    // Fetch the Gitea user ID for the authenticated user.
-    let user_id = get_gitea_user_id(&http_client, &config.gitea_url, &config.api_key).await?;
-    info!(
-        "Successfully authenticated and retrieved user ID: {}",
-        user_id
-    );
+    // Determine the owner (either from repo_owner or authenticated user)
+    let owner_name = if let Some(owner) = &config.repo_owner {
+        info!("Using specified repo_owner: {}", owner);
+        owner.clone()
+    } else {
+        info!("No repo_owner specified, fetching authenticated user");
+        get_authenticated_username(&http_client, &config.gitea_url, &config.api_key).await?
+    };
+
+    info!("Using owner '{}' for all migrated repositories", owner_name);
 
     // Process repositories from the static list.
     if let Some(repos) = &config.repos {
@@ -90,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             process_repo(
                 &repo_config.url,
                 repo_config.rename.as_deref(),
-                user_id,
+                &owner_name,
                 &http_client,
                 &config,
                 args.dry_run,
@@ -119,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         process_repo(
                             &url,
                             None, // No rename support for orgs
-                            user_id,
+                            &owner_name,
                             &http_client,
                             &config,
                             args.dry_run,
@@ -145,13 +150,13 @@ fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-/// Fetches the authenticated user's ID from Gitea.
+/// Fetches the authenticated user's login name from Gitea.
 #[instrument(skip(http_client, gitea_url, api_key))]
-async fn get_gitea_user_id(
+async fn get_authenticated_username(
     http_client: &reqwest::Client,
     gitea_url: &str,
     api_key: &str,
-) -> Result<i64, reqwest::Error> {
+) -> Result<String, reqwest::Error> {
     let url = format!("{}/api/v1/user", gitea_url);
     let user: GiteaUser = http_client
         .get(&url)
@@ -161,7 +166,8 @@ async fn get_gitea_user_id(
         .error_for_status()?
         .json()
         .await?;
-    Ok(user.id)
+    info!("Authenticated as user: {}", user.login);
+    Ok(user.login)
 }
 
 /// Checks if a repository already exists in Gitea for the user.
@@ -276,11 +282,11 @@ async fn fetch_org_repos(
 }
 
 /// Core logic to process a single repository.
-#[instrument(skip(user_id, http_client, config, dry_run))]
+#[instrument(skip(owner_name, http_client, config, dry_run))]
 async fn process_repo(
     repo_url: &str,
     rename: Option<&str>,
-    user_id: i64,
+    owner_name: &str,
     http_client: &reqwest::Client,
     config: &Config,
     dry_run: bool,
@@ -301,10 +307,10 @@ async fn process_repo(
             let payload = MigrateRepoPayload {
                 clone_addr: repo_url,
                 repo_name,
+                repo_owner: owner_name,
                 mirror: true,
                 private: false, // Defaulting to public, change if needed
                 description: "",
-                uid: user_id,
             };
             if let Err(e) = create_migration(http_client, config, &payload).await {
                 error!("Failed to create migration for '{}': {}", repo_name, e);
