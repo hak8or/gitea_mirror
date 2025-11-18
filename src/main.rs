@@ -22,6 +22,10 @@ struct Args {
     /// Skip the interactive confirmation prompt.
     #[clap(long, default_value_t = false)]
     no_confirm: bool,
+
+    /// Do not delete repositories from Gitea.
+    #[clap(long, default_value_t = false)]
+    no_delete: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -145,18 +149,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  [+] ADD:    {}  (Source: {})", name, url);
     }
     for name in &to_delete {
-        println!("  [-] DELETE: {}", name);
+        if args.no_delete {
+            println!("  [~] SKIP DELETE: {} (--no-delete active)", name);
+        } else {
+            println!("  [-] DELETE: {}", name);
+        }
     }
     println!("----------------------");
-    println!(
-        "Summary: {} to add, {} to delete, {} unchanged.",
-        to_add.len(),
-        to_delete.len(),
-        to_keep.len()
-    );
 
-    if to_add.is_empty() && to_delete.is_empty() {
-        info!("Sync complete. No changes detected.");
+    if args.no_delete {
+        println!(
+            "Summary: {} to add, {} to delete (SKIPPED), {} unchanged.",
+            to_add.len(),
+            to_delete.len(),
+            to_keep.len()
+        );
+    } else {
+        println!(
+            "Summary: {} to add, {} to delete, {} unchanged.",
+            to_add.len(),
+            to_delete.len(),
+            to_keep.len()
+        );
+    }
+
+    // If nothing to add, and (deletes are empty OR we are skipping deletes), then done.
+    if to_add.is_empty() && (to_delete.is_empty() || args.no_delete) {
+        info!("Sync complete. No changes to apply.");
         return Ok(());
     }
 
@@ -197,12 +216,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Deletions
-    for name in to_delete {
-        info!("Deleting {}...", name);
-        match delete_repo(&http_client, &config, &owner_name, &name).await {
-            Ok(_) => info!("Successfully deleted {}", name),
-            Err(e) => error!("Failed to delete {}: {}", name, e),
+    if !args.no_delete {
+        for name in to_delete {
+            info!("Deleting {}...", name);
+            match delete_repo(&http_client, &config, &owner_name, &name).await {
+                Ok(_) => info!("Successfully deleted {}", name),
+                Err(e) => error!("Failed to delete {}: {}", name, e),
+            }
         }
+    } else if !to_delete.is_empty() {
+        info!("Skipping deletions due to --no-delete flag.");
     }
 
     info!("Process completed.");
