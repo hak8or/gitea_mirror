@@ -15,6 +15,10 @@ struct Args {
     #[clap(short, long, value_parser, env = "GITEA_MIRROR_CONFIG_FILEPATH")]
     config: PathBuf,
 
+    /// Gitea API Key.
+    #[clap(short, long, env = "GITEA_MIRROR_API_KEY")]
+    api_key: Option<String>,
+
     /// Calculate the plan but do not execute API calls.
     #[clap(short, long, default_value_t = false)]
     dry_run: bool,
@@ -43,7 +47,7 @@ struct OrgConfig {
 #[derive(Deserialize, Debug)]
 struct Config {
     gitea_url: String,
-    api_key: String,
+    api_key: Option<String>,
     repos: Option<Vec<RepoConfig>>,
     organizations: Option<Vec<OrgConfig>>,
     repo_owner: Option<String>,
@@ -71,11 +75,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(&args.config)?;
     let http_client = reqwest::Client::new();
 
+    // Resolve API Key: CLI/Env > Config File
+    let final_api_key = args
+        .api_key
+        .or(config.api_key.clone())
+        .ok_or("API Key must be provided via --api-key, GITEA_MIRROR_API_KEY, or config file.")?;
+
     // 1. Determine Target Owner
     let owner_name = if let Some(owner) = &config.repo_owner {
         owner.clone()
     } else {
-        get_authenticated_username(&http_client, &config.gitea_url, &config.api_key).await?
+        get_authenticated_username(&http_client, &config.gitea_url, &final_api_key).await?
     };
     info!("Target Owner: {}", owner_name);
 
@@ -111,7 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build 'Current' State (Set<RepoName>)
     info!("Fetching existing repositories from Gitea ({})", owner_name);
-    let existing_repos = fetch_all_target_repos(&http_client, &config, &owner_name).await?;
+    let existing_repos =
+        fetch_all_target_repos(&http_client, &config.gitea_url, &final_api_key, &owner_name)
+            .await?;
     let existing_set: HashSet<String> = existing_repos.into_iter().collect();
 
     // 4. Calculate Diff
@@ -209,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             description: "Mirrored via gitea-mirror",
         };
 
-        match create_migration(&http_client, &config, &payload).await {
+        match create_migration(&http_client, &config.gitea_url, &final_api_key, &payload).await {
             Ok(_) => info!("Successfully migrated {}", name),
             Err(e) => error!("Failed to migrate {}: {}", name, e),
         }
@@ -219,7 +231,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.no_delete {
         for name in to_delete {
             info!("Deleting {}...", name);
-            match delete_repo(&http_client, &config, &owner_name, &name).await {
+            match delete_repo(
+                &http_client,
+                &config.gitea_url,
+                &final_api_key,
+                &owner_name,
+                &name,
+            )
+            .await
+            {
                 Ok(_) => info!("Successfully deleted {}", name),
                 Err(e) => error!("Failed to delete {}: {}", name, e),
             }
@@ -265,21 +285,15 @@ async fn get_authenticated_username(
 }
 
 /// Fetches ALL repos for the target owner on the Gitea instance.
-/// Handles pagination to ensure we have the complete state for syncing.
 async fn fetch_all_target_repos(
     client: &reqwest::Client,
-    config: &Config,
+    gitea_url: &str,
+    api_key: &str,
     owner: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut names = Vec::new();
     let mut page = 1;
-    // Try organization endpoint first, fall back to user?
-    // Gitea distinguishes /orgs/{org}/repos and /users/{user}/repos.
-    // To be safe, we search via search API restricted to owner, or try both.
-    // Simplest compliant way: /repos/search?uid={owner_id} or q=&owner={owner}
-
-    // Let's use the specific search endpoint which is robust.
-    let base_url = format!("{}/api/v1/repos/search", config.gitea_url);
+    let base_url = format!("{}/api/v1/repos/search", gitea_url);
 
     loop {
         let params = [
@@ -290,7 +304,7 @@ async fn fetch_all_target_repos(
 
         let res = client
             .get(&base_url)
-            .bearer_auth(&config.api_key)
+            .bearer_auth(api_key)
             .query(&params)
             .send()
             .await?
@@ -371,13 +385,14 @@ async fn fetch_external_org_repos(
 
 async fn create_migration(
     client: &reqwest::Client,
-    config: &Config,
+    gitea_url: &str,
+    api_key: &str,
     payload: &MigrateRepoPayload<'_>,
 ) -> Result<(), reqwest::Error> {
-    let url = format!("{}/api/v1/repos/migrate", config.gitea_url);
+    let url = format!("{}/api/v1/repos/migrate", gitea_url);
     client
         .post(&url)
-        .bearer_auth(&config.api_key)
+        .bearer_auth(api_key)
         .json(payload)
         .send()
         .await?
@@ -387,14 +402,15 @@ async fn create_migration(
 
 async fn delete_repo(
     client: &reqwest::Client,
-    config: &Config,
+    gitea_url: &str,
+    api_key: &str,
     owner: &str,
     repo_name: &str,
 ) -> Result<(), reqwest::Error> {
-    let url = format!("{}/api/v1/repos/{}/{}", config.gitea_url, owner, repo_name);
+    let url = format!("{}/api/v1/repos/{}/{}", gitea_url, owner, repo_name);
     client
         .delete(&url)
-        .bearer_auth(&config.api_key)
+        .bearer_auth(api_key)
         .send()
         .await?
         .error_for_status()?;
