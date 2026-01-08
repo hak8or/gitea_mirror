@@ -5,7 +5,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing::{Level, error, info, instrument, warn};
-use tracing_subscriber;
 
 #[derive(Parser, Debug)]
 #[command(name = "gitea-mirror")]
@@ -262,7 +261,7 @@ fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
 }
 
 fn extract_repo_name(url: &str) -> Option<&str> {
-    url.split('/').last().map(|s| s.trim_end_matches(".git"))
+    url.split('/').next_back().map(|s| s.trim_end_matches(".git"))
 }
 
 // --- API Calls ---
@@ -291,19 +290,35 @@ async fn fetch_all_target_repos(
     api_key: &str,
     owner: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let org_url = format!("{}/api/v1/orgs/{}/repos", gitea_url, owner);
+    match fetch_repos_from_endpoint(client, &org_url, api_key).await {
+        Ok(repos) => Ok(repos),
+        Err(e) => {
+            if e.downcast_ref::<reqwest::Error>()
+                .is_some_and(|r| r.status() == Some(reqwest::StatusCode::NOT_FOUND))
+            {
+                info!("Owner '{}' not found as org, trying as user...", owner);
+                let user_url = format!("{}/api/v1/users/{}/repos", gitea_url, owner);
+                return fetch_repos_from_endpoint(client, &user_url, api_key).await;
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn fetch_repos_from_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut names = Vec::new();
     let mut page = 1;
-    let base_url = format!("{}/api/v1/repos/search", gitea_url);
 
     loop {
-        let params = [
-            ("owner", owner),
-            ("limit", "50"),
-            ("page", &page.to_string()),
-        ];
+        let params = [("limit", "50"), ("page", &page.to_string())];
 
         let res = client
-            .get(&base_url)
+            .get(url)
             .bearer_auth(api_key)
             .query(&params)
             .send()
@@ -311,10 +326,7 @@ async fn fetch_all_target_repos(
             .error_for_status()?;
 
         let json: serde_json::Value = res.json().await?;
-        let data = json
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or("Invalid API response")?;
+        let data = json.as_array().ok_or("Invalid API response")?;
 
         if data.is_empty() {
             break;
@@ -347,7 +359,7 @@ async fn fetch_external_org_repos(
         // Heuristic to find API endpoint from web URL
         format!(
             "{}s/{}/repos",
-            org_url.replace(user_or_org, &format!("api/v1/user")),
+            org_url.replace(user_or_org, "api/v1/user"),
             user_or_org
         )
     };
