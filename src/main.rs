@@ -92,6 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Build 'Desired' State (Map<RepoName, CloneUrl>)
     info!("Resolving desired state from configuration...");
     let mut desired_repos: HashMap<String, String> = HashMap::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    let mut has_error = false;
 
     // 2a. Static Repos
     if let Some(repos) = &config.repos {
@@ -101,6 +103,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_deref()
                 .or_else(|| extract_repo_name(&r.url))
                 .ok_or_else(|| format!("Invalid URL: {}", r.url))?;
+
+            let name_lower = name.to_lowercase();
+            if seen_names.contains(&name_lower) {
+                warn!(
+                    "Duplicate repository name detected (case-insensitive): '{}'. URL: {}",
+                    name, r.url
+                );
+                has_error = true;
+                continue;
+            }
+            seen_names.insert(name_lower);
+
             desired_repos.insert(name.to_string(), r.url.clone());
         }
     }
@@ -113,10 +127,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fetch_external_org_repos(&http_client, &org.url, org.api_key.as_deref()).await?;
             for url in urls {
                 if let Some(name) = extract_repo_name(&url) {
+                    let name_lower = name.to_lowercase();
+                    if seen_names.contains(&name_lower) {
+                        warn!(
+                            "Duplicate repository name detected (case-insensitive) from organization import: '{}'. URL: {}",
+                            name, url
+                        );
+                        has_error = true;
+                        continue;
+                    }
+                    seen_names.insert(name_lower);
                     desired_repos.insert(name.to_string(), url);
                 }
             }
         }
+    }
+
+    if has_error {
+        return Err("Duplicate repository names detected. Please fix the configuration.".into());
     }
 
     // 3. Build 'Current' State (Set<RepoName>)
