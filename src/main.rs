@@ -8,6 +8,7 @@ use tracing::{Level, error, info, instrument, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "gitea-mirror")]
+#[command(version = env!("GIT_VERSION"))]
 #[command(about = "Syncs Git repositories to Gitea based on a TOML config.")]
 struct Args {
     /// Path to the TOML configuration file.
