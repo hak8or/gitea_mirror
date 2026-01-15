@@ -4,28 +4,48 @@ on:
   push:
   pull_request:
 
+# For github actions, gitea doesn't seem to need this.
+permissions:
+  contents: write
+
 env: 
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_and_test:
-    name: Rust project - latest
+  build_latest:
+    name: Build - ubuntu-latest
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust_ver:
-          - "1.90"
-    # Very ugly way to force cargo and jazz to be in PATH across run's but
-    # lets fix this alter.
     steps:
       - uses: actions/checkout@v4
       - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
       - run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - run: rustup update ${{ matrix.rust_ver }} && rustup default ${{ matrix.rust_ver }}
+      - run: rustup update 1.90 && rustup default 1.90
       - run: cargo build
       - run: cargo build --release
+      - name: Rename binary
+        if: github.ref_type == 'tag'
+        run: mv target/release/gitea_mirror target/release/gitea_mirror-${{ github.ref_name }}-ubuntu-latest
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          files: target/release/gitea_mirror
+          files: target/release/gitea_mirror-${{ github.ref_name }}-ubuntu-latest
+
+  build_legacy:
+    name: Build - ubuntu-22.04
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+      - run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - run: rustup update 1.90 && rustup default 1.90
+      - run: cargo build
+      - run: cargo build --release
+      - name: Rename binary
+        if: github.ref_type == 'tag'
+        run: mv target/release/gitea_mirror target/release/gitea_mirror-${{ github.ref_name }}-ubuntu-22.04
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: target/release/gitea_mirror-${{ github.ref_name }}-ubuntu-22.04
