@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing::{Level, error, info, instrument, warn};
+use git2::{Cred, Direction, Remote, RemoteCallbacks};
 
 #[derive(Parser, Debug)]
 #[command(name = "gitea-mirror")]
@@ -30,6 +31,10 @@ struct Args {
     /// Do not delete repositories from Gitea.
     #[clap(long, default_value_t = false)]
     no_delete: bool,
+
+    /// Verify if repositories are fetchable (checks connectivity and presence of commits).
+    #[clap(long, default_value_t = false)]
+    verify_canfetch: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -154,6 +159,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     let existing_set: HashSet<String> = existing_repos.into_iter().collect();
 
+    // --- Verify Existing Repos if requested ---
+    if args.verify_canfetch {
+        info!("Verifying accessibility of existing repositories...");
+        let mut verification_failed = false;
+        for name in &existing_set {
+            let repo_url = format!("{}/{}/{}.git", config.gitea_url, owner_name, name);
+            // Use the API key for auth if needed
+            match verify_repo_accessible(&repo_url, &owner_name, Some(&final_api_key)) {
+                Ok(_) => info!("Verified [OK]: {}", name),
+                Err(e) => {
+                    error!("Verified [FAIL]: {} - {}", name, e);
+                    verification_failed = true;
+                }
+            }
+        }
+        if verification_failed {
+            return Err("Verification of existing repositories failed. Please investigate the errors above.".into());
+        }
+    }
+
     // 4. Calculate Diff
     let mut to_add: Vec<(String, String)> = desired_repos
         .iter()
@@ -237,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 7. Execute
+    let mut migration_verification_failed = false;
     // Additions
     for (name, url) in to_add {
         info!("Migrating {}...", name);
@@ -250,7 +276,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match create_migration(&http_client, &config.gitea_url, &final_api_key, &payload).await {
-            Ok(_) => info!("Successfully migrated {}", name),
+            Ok(_) => {
+                info!("Successfully migrated {}", name);
+                // Verify after migration if requested
+                if args.verify_canfetch {
+                     let repo_url = format!("{}/{}/{}.git", config.gitea_url, owner_name, name);
+                     match verify_repo_accessible(&repo_url, &owner_name, Some(&final_api_key)) {
+                         Ok(_) => info!("Verified [OK] (Post-Migration): {}", name),
+                         Err(e) => {
+                             error!("Verified [FAIL] (Post-Migration): {} - {}", name, e);
+                             migration_verification_failed = true;
+                         }
+                     }
+                }
+            },
             Err(e) => error!("Failed to migrate {}: {}", name, e),
         }
     }
@@ -276,11 +315,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Skipping deletions due to --no-delete flag.");
     }
 
+    if migration_verification_failed {
+        return Err("Verification of migrated repositories failed. Please investigate the errors above.".into());
+    }
+
     info!("Process completed.");
     Ok(())
 }
 
 // --- Helpers ---
+
+fn verify_repo_accessible(url: &str, username: &str, api_key: Option<&str>) -> Result<(), String> {
+    let mut callbacks = RemoteCallbacks::new();
+    if let Some(key) = api_key {
+        let key = key.to_string();
+        let user = username.to_string();
+        callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
+            Cred::userpass_plaintext(&user, &key)
+        });
+    }
+
+    // Create a detached remote (no local repo needed)
+    let mut remote = Remote::create_detached(url).map_err(|e| format!("Invalid Remote URL: {}", e))?;
+    
+    // Attempt to connect and fetch list of refs
+    // connect_auth handles authentication if needed
+    remote.connect_auth(Direction::Fetch, Some(callbacks), None)
+        .map_err(|e| format!("Connection/Auth failed: {}", e))?;
+    
+    // List refs to ensure it's a valid git repo and accessible
+    let list = remote.list().map_err(|e| format!("Failed to list refs: {}", e))?;
+    
+    if list.is_empty() {
+        return Err("Repository is empty (no refs found)".to_string());
+    }
+    
+    Ok(())
+}
 
 #[instrument(skip(path))]
 fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
