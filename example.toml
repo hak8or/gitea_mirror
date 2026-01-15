@@ -16,6 +16,15 @@ repos = [
 	{ url = "https://github.com/justcallmekoko/ESP32Marauder" }
 ]
 
+# Optional: List of repository names to exclude from verification (if --verify-canfetch is used)
+repos_exclude_verify = [
+    { name = "ESP32Marauder", reason = "This repo is known to be flaky." },
+    { name = "some-other-repo", reason = """
+    This repo is very large and times out.
+    We will fix this later.
+    """ }
+]
+
 organizations = [
 	{ url = "https://gitea.hak8or.com/mirrors" },
 ]

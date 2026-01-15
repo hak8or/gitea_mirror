@@ -49,6 +49,12 @@ struct OrgConfig {
     api_key: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+struct ExcludeVerifyConfig {
+    name: String,
+    reason: String,
+}
+
 #[derive(Deserialize, Debug)]
 struct Config {
     gitea_url: String,
@@ -56,6 +62,7 @@ struct Config {
     repos: Option<Vec<RepoConfig>>,
     organizations: Option<Vec<OrgConfig>>,
     repo_owner: Option<String>,
+    repos_exclude_verify: Option<Vec<ExcludeVerifyConfig>>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -93,6 +100,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         get_authenticated_username(&http_client, &config.gitea_url, &final_api_key).await?
     };
     info!("Target Owner: {}", owner_name);
+
+    // Prepare exclusion map for verification (Name -> Reason)
+    let exclude_verify_map: HashMap<String, String> = config
+        .repos_exclude_verify
+        .as_ref()
+        .map(|list| list.iter().map(|item| (item.name.clone(), item.reason.clone())).collect())
+        .unwrap_or_default();
 
     // 2. Build 'Desired' State (Map<RepoName, CloneUrl>)
     info!("Resolving desired state from configuration...");
@@ -164,6 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Verifying accessibility of existing repositories...");
         let mut verification_failed = false;
         for name in &existing_set {
+            if let Some(reason) = exclude_verify_map.get(name) {
+                info!("Skipping verification for [EXCLUDED]: {} - Reason: {}", name, reason);
+                continue;
+            }
             let repo_url = format!("{}/{}/{}.git", config.gitea_url, owner_name, name);
             // Use the API key for auth if needed
             match verify_repo_accessible(&repo_url, &owner_name, Some(&final_api_key)) {
@@ -280,14 +298,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Successfully migrated {}", name);
                 // Verify after migration if requested
                 if args.verify_canfetch {
-                     let repo_url = format!("{}/{}/{}.git", config.gitea_url, owner_name, name);
-                     match verify_repo_accessible(&repo_url, &owner_name, Some(&final_api_key)) {
-                         Ok(_) => info!("Verified [OK] (Post-Migration): {}", name),
-                         Err(e) => {
-                             error!("Verified [FAIL] (Post-Migration): {} - {}", name, e);
-                             migration_verification_failed = true;
-                         }
-                     }
+                    if let Some(reason) = exclude_verify_map.get(&name) {
+                        info!("Skipping post-migration verification for [EXCLUDED]: {} - Reason: {}", name, reason);
+                    } else {
+                        let repo_url = format!("{}/{}/{}.git", config.gitea_url, owner_name, name);
+                        match verify_repo_accessible(&repo_url, &owner_name, Some(&final_api_key)) {
+                            Ok(_) => info!("Verified [OK] (Post-Migration): {}", name),
+                            Err(e) => {
+                                error!("Verified [FAIL] (Post-Migration): {} - {}", name, e);
+                                migration_verification_failed = true;
+                            }
+                        }
+                    }
                 }
             },
             Err(e) => error!("Failed to migrate {}: {}", name, e),
